@@ -475,6 +475,21 @@ env.Library(
 )
 
 env.Library(
+    target='op_journey',
+    source=[
+        'op_journey.cpp',
+        'op_journey.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/idl/server_parameter',
+    ],
+)
+
+env.Library(
     target='prepare_conflict_tracker',
     source=[
         'prepare_conflict_tracker.cpp',
@@ -865,6 +880,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/command_can_run_here',
         '$BUILD_DIR/mongo/db/curop_metrics',
+        '$BUILD_DIR/mongo/db/op_journey',
         '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/repl/tenant_migration_donor',
         '$BUILD_DIR/mongo/db/rw_concern_d',

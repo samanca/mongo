@@ -38,6 +38,7 @@
 #include "mongo/config.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/op_journey.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/traffic_recorder.h"
 #include "mongo/logv2/log.h"
@@ -337,6 +338,7 @@ void ServiceStateMachine::_sourceMessage(ThreadGuard guard) {
 
 void ServiceStateMachine::_sinkMessage(ThreadGuard guard, Message toSink) {
     // Sink our response to the client
+    OpJourneyStage(_killedOpCtx.get(), OpJourney::kNetworkSync);
     invariant(_state.load() == State::Process);
     _state.store(State::SinkWait);
     guard.release();
@@ -353,7 +355,10 @@ void ServiceStateMachine::_sinkMessage(ThreadGuard guard, Message toSink) {
         }
     };
 
-    sinkMsgImpl().getAsync([this](Status status) { _sinkCallback(std::move(status)); });
+    sinkMsgImpl().getAsync([this](Status status) {
+        OpJourneyStage(_killedOpCtx.get(), OpJourney::kReleased);
+        _sinkCallback(std::move(status));
+    });
 }
 
 void ServiceStateMachine::_sourceCallback(Status status) {
@@ -464,6 +469,8 @@ void ServiceStateMachine::_processMessage(ThreadGuard guard) {
     if (_inExhaust) {
         opCtx->markKillOnClientDisconnect();
     }
+
+    OpJourney::enable(opCtx.get());
 
     // The handleRequest is implemented in a subclass for mongod/mongos and actually all the
     // database work for this request.
