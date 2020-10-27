@@ -78,7 +78,7 @@ public:
 
     void append(BSONObjBuilder& bob) const;
 
-    static constexpr auto kDiagnosticLogLevel = 0;
+    static constexpr auto kDiagnosticLogLevel = 4;
 
 private:
     const OperationContext* _opCtx;
