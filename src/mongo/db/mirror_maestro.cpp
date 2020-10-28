@@ -47,6 +47,7 @@
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/mirror_maestro_gen.h"
 #include "mongo/db/mirroring_sampler.h"
+#include "mongo/db/op_journey.h"
 #include "mongo/db/repl/is_master_response.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/topology_version_observer.h"
@@ -90,7 +91,7 @@ public:
     /**
      * Mirror only if this maestro has been initialized
      */
-    void tryMirror(std::shared_ptr<CommandInvocation> invocation) noexcept;
+    void tryMirror(OperationContext* opCtx, std::shared_ptr<CommandInvocation> invocation) noexcept;
 
     /**
      * Maintains the state required for mirroring requests.
@@ -285,10 +286,11 @@ void MirrorMaestro::tryMirrorRequest(OperationContext* opCtx) noexcept {
 
     auto invocation = CommandInvocation::get(opCtx);
 
-    impl.tryMirror(std::move(invocation));
+    impl.tryMirror(opCtx, std::move(invocation));
 }
 
-void MirrorMaestroImpl::tryMirror(std::shared_ptr<CommandInvocation> invocation) noexcept {
+void MirrorMaestroImpl::tryMirror(OperationContext* opCtx,
+                                  std::shared_ptr<CommandInvocation> invocation) noexcept {
     if (!_isInitialized.load()) {
         // If we're not even available, nothing to do
         return;
@@ -300,6 +302,7 @@ void MirrorMaestroImpl::tryMirror(std::shared_ptr<CommandInvocation> invocation)
         return;
     }
 
+    auto scoped = makeScopedOpJourney(opCtx, OpJourney::kMirroring);
     gMirroredReadsSection.seen.fetchAndAdd(1);
 
     auto params = _params->_data.get();

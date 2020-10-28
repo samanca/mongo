@@ -455,6 +455,8 @@ env.Library(
         'operation_context_group.cpp',
         'operation_cpu_timer.cpp',
         'operation_key_manager.cpp',
+        'op_journey.cpp',
+        'op_journey.idl',
         'service_context.cpp',
         'server_recovery.cpp',
         'repl_set_member_in_standalone_mode.cpp',
@@ -475,10 +477,9 @@ env.Library(
 )
 
 env.Library(
-    target='op_journey',
+    target='op_journey_command',
     source=[
-        'op_journey.cpp',
-        'op_journey.idl',
+        'op_journey_command.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -880,7 +881,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/command_can_run_here',
         '$BUILD_DIR/mongo/db/curop_metrics',
-        '$BUILD_DIR/mongo/db/op_journey',
         '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/repl/tenant_migration_donor',
         '$BUILD_DIR/mongo/db/rw_concern_d',

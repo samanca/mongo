@@ -34,19 +34,20 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/duration.h"
 
 namespace mongo {
 
-#define OpJourneyStage(opCtx, stage)                  \
-    {                                                 \
-        if (OpJourney::isTrackingEnabled())           \
-            OpJourney::get(opCtx)->enterStage(stage); \
+#define OpJourneyStage(opCtx, stage)                       \
+    {                                                      \
+        if (auto tracker = OpJourney::get(opCtx); tracker) \
+            tracker->enterStage(stage);                    \
     }
 
-#define makeScopedOpJourney(opCtx, stage)                                                   \
-    OpJourney::isTrackingEnabled() ? std::make_unique<OpJourney::ScopedStage>(opCtx, stage) \
-                                   : std::unique_ptr<OpJourney::ScopedStage>(nullptr)
+#define makeScopedOpJourney(opCtx, stage)                                          \
+    OpJourney::get(opCtx) ? std::make_unique<OpJourney::ScopedStage>(opCtx, stage) \
+                          : std::unique_ptr<OpJourney::ScopedStage>(nullptr)
 
 /**
  * TODO
@@ -61,6 +62,13 @@ public:
 
     enum Stage {
         kRunning = 0,  // This must always be set to zero.
+        kWaitForReadConcern,
+        kWaitForWriteConcern,
+        kMirroring,
+        kCheckAuth,
+        kAcquireDbLock,
+        kExtractReadConcern,
+        kComputeAndGossipOpTime,
         kNetworkSync,
         kReleased,
         kDestroyed,  // This must be the last stage.
@@ -117,6 +125,34 @@ public:
 private:
     OperationContext* _opCtx;
     const Stage _oldStage;
+};
+
+class ServiceContext;
+
+class OpJourney::Observer final {
+public:
+    Observer(Observer&&) = delete;
+    Observer(const Observer&) = delete;
+
+    Observer();
+
+    static Observer* get(ServiceContext* svc);
+
+    void capture(const OpJourney* journey);
+
+    void append(BSONObjBuilder& bob);
+
+private:
+    AtomicWord<int64_t> _totalOps;
+    std::vector<AtomicWord<Nanoseconds::rep>> _max;
+    std::vector<AtomicWord<Nanoseconds::rep>> _min;
+
+    struct StageSummary {
+        StageSummary() : ops(0), duration(0) {}
+        AtomicWord<int64_t> ops;
+        AtomicWord<Nanoseconds::rep> duration;
+    };
+    std::vector<StageSummary> _summary;
 };
 
 }  // namespace mongo

@@ -38,13 +38,9 @@
 #include "mongo/db/op_journey.h"
 #include "mongo/db/op_journey_gen.h"
 
-#include "mongo/base/error_codes.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands.h"
-#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
@@ -76,6 +72,20 @@ auto stageToString(OpJourney::Stage stage) {
     switch (stage) {
         case Stage::kRunning:
             return "running";
+        case Stage::kWaitForReadConcern:
+            return "waitForReadConcern";
+        case Stage::kWaitForWriteConcern:
+            return "waitForWriteConcern";
+        case Stage::kMirroring:
+            return "readMirroring";
+        case Stage::kCheckAuth:
+            return "checkAuthorization";
+        case Stage::kExtractReadConcern:
+            return "extractReadConcern";
+        case Stage::kAcquireDbLock:
+            return "acquireDbLock";
+        case Stage::kComputeAndGossipOpTime:
+            return "computeAndGossipOpTime";
         case Stage::kNetworkSync:
             return "egress";
         case Stage::kReleased:
@@ -91,40 +101,16 @@ static auto getOpJourney = OperationContext::declareDecoration<boost::optional<O
 
 }  // namespace
 
-class OpJourney::Observer final {
-public:
-    Observer(Observer&&) = delete;
-    Observer(const Observer&) = delete;
-
-    Observer()
-        : _totalOps(0),
-          _max(static_cast<size_t>(kDestroyed)),
-          _min(static_cast<size_t>(kDestroyed)),
-          _summary(static_cast<size_t>(kDestroyed)) {
-        for (size_t stage = 0; stage < static_cast<size_t>(kDestroyed); stage++) {
-            _max[stage].store(Nanoseconds::min().count());
-            _min[stage].store(Nanoseconds::max().count());
-        }
+OpJourney::Observer::Observer()
+    : _totalOps(0),
+      _max(static_cast<size_t>(kDestroyed)),
+      _min(static_cast<size_t>(kDestroyed)),
+      _summary(static_cast<size_t>(kDestroyed)) {
+    for (size_t stage = 0; stage < static_cast<size_t>(kDestroyed); stage++) {
+        _max[stage].store(Nanoseconds::min().count());
+        _min[stage].store(Nanoseconds::max().count());
     }
-
-    static Observer* get(ServiceContext* svc);
-
-    void capture(const OpJourney* journey);
-
-    void append(BSONObjBuilder& bob);
-
-private:
-    AtomicWord<int64_t> _totalOps;
-    std::vector<AtomicWord<Nanoseconds::rep>> _max;
-    std::vector<AtomicWord<Nanoseconds::rep>> _min;
-
-    struct StageSummary {
-        StageSummary() : ops(0), duration(0) {}
-        AtomicWord<int64_t> ops;
-        AtomicWord<Nanoseconds::rep> duration;
-    };
-    std::vector<StageSummary> _summary;
-};
+}
 
 static auto getOpJourneyObserver =
     ServiceContext::declareDecoration<boost::optional<OpJourney::Observer>>();
@@ -233,8 +219,6 @@ void OpJourney::append(BSONObjBuilder& bob) const {
     bob.append("other", (total - sum).toBSON());
 }
 
-namespace {
-
 ServiceContext::ConstructorActionRegisterer registerOpJourneyObserver(
     "OpJourneyObserver", [](ServiceContext* svc) {
         if (!OpJourney::isTrackingEnabled())
@@ -243,37 +227,4 @@ ServiceContext::ConstructorActionRegisterer registerOpJourneyObserver(
         LOGV2_DEBUG(7777703, OpJourney::kDiagnosticLogLevel, "Started operation journey observer");
     });
 
-class CmdOpJourney final : public BasicCommand {
-public:
-    CmdOpJourney() : BasicCommand("opJourney") {}
-
-    bool run(OperationContext* opCtx,
-             const std::string&,
-             const BSONObj&,
-             BSONObjBuilder& result) override {
-        internalAssert(ErrorCodes::CommandNotSupported,
-                       "Operation journey tracking is not enabled",
-                       OpJourney::isTrackingEnabled());
-
-        // TODO add support for individual operations
-        OpJourney::Observer::get(opCtx->getServiceContext())->append(result);
-        return true;
-    }
-
-    bool adminOnly() const override {
-        return true;
-    }
-
-    bool supportsWriteConcern(const BSONObj&) const override {
-        return false;
-    }
-
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
-        return AllowedOnSecondary::kAlways;
-    }
-};
-
-MONGO_REGISTER_TEST_COMMAND(CmdOpJourney);
-
-}  // namespace
 }  // namespace mongo

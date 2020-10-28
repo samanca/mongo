@@ -60,6 +60,7 @@
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/logical_time_validator.h"
+#include "mongo/db/op_journey.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/query/find.h"
@@ -316,6 +317,7 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
                                                       const BSONObj& cmdObj,
                                                       bool startTransaction,
                                                       bool isInternalClient) {
+    auto scoped = makeScopedOpJourney(opCtx, OpJourney::kExtractReadConcern);
     repl::ReadConcernArgs readConcernArgs;
 
     auto readConcernParseStatus = readConcernArgs.initialize(cmdObj);
@@ -498,6 +500,8 @@ void appendClusterAndOperationTime(OperationContext* opCtx,
         !VectorClock::get(opCtx)->isEnabled()) {
         return;
     }
+
+    auto scoped = makeScopedOpJourney(opCtx, OpJourney::kComputeAndGossipOpTime);
 
     // The appended operationTime must always be <= the appended $clusterTime, so first compute the
     // operationTime.
@@ -833,6 +837,7 @@ bool runCommandImpl(OperationContext* opCtx,
         }
 
         auto waitForWriteConcern = [&](auto&& bb) {
+            auto scoped = makeScopedOpJourney(opCtx, OpJourney::kWaitForWriteConcern);
             bool reallyWait = true;
             failCommand.executeIf(
                 [&](const BSONObj& data) {
@@ -1103,7 +1108,10 @@ void execCommandDatabase(OperationContext* opCtx,
         }
 
         ImpersonationSessionGuard guard(opCtx);
-        invocation->checkAuthorization(opCtx, request);
+        {
+            auto guard = makeScopedOpJourney(opCtx, OpJourney::kCheckAuth);
+            invocation->checkAuthorization(opCtx, request);
+        }
 
         const bool iAmPrimary = replCoord->canAcceptWritesForDatabase_UNSAFE(opCtx, dbname);
 
@@ -1283,8 +1291,11 @@ void execCommandDatabase(OperationContext* opCtx,
             rpc::TrackingMetadata::get(opCtx).setIsLogged(true);
         }
 
-        behaviors.waitForReadConcern(opCtx, invocation.get(), request);
-        behaviors.setPrepareConflictBehaviorForReadConcern(opCtx, invocation.get());
+        {
+            auto scoped = makeScopedOpJourney(opCtx, OpJourney::kWaitForReadConcern);
+            behaviors.waitForReadConcern(opCtx, invocation.get(), request);
+            behaviors.setPrepareConflictBehaviorForReadConcern(opCtx, invocation.get());
+        }
 
         try {
             if (!runCommandImpl(opCtx,
