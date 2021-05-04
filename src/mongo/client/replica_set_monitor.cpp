@@ -49,6 +49,8 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/alarm.h"
+#include "mongo/util/alarm_runner_background_thread.h"
 #include "mongo/util/background.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/exit.h"
@@ -87,7 +89,7 @@ using executor::TaskExecutor;
 using CallbackArgs = TaskExecutor::CallbackArgs;
 using CallbackHandle = TaskExecutor::CallbackHandle;
 
-const double socketTimeoutSecs = 5;
+const Seconds socketTimeout{5};
 
 // Intentionally chosen to compare worse than all known latencies.
 const int64_t unknownLatency = numeric_limits<int64_t>::max();
@@ -841,6 +843,122 @@ void Refresher::receivedIsMasterBeforeFoundMaster(const IsMasterReply& reply, bo
     }
 }
 
+// TODO
+
+class AsyncRefresher final {
+public:
+    AsyncRefresher() = default;
+    ~AsyncRefresher();
+
+    struct Reply {
+        Reply(BSONObj obj, int64_t pingMicros) : isMaster(std::move(obj)), pingMicros(pingMicros) {}
+        BSONObj isMaster;
+        int64_t pingMicros;
+    };
+
+    struct State {
+        State(MongoURI uri, Seconds timeout, Promise<Reply> promise)
+            : uri(std::move(uri)), timeout(std::move(timeout)), promise(std::move(promise)) {}
+
+        const MongoURI uri;
+        const Seconds timeout;
+        Promise<Reply> promise;
+        AtomicWord<bool> finishLine{false};
+    };
+
+    void init();
+
+    Future<Reply> asyncRefresh(MongoURI uri, Seconds timeout);
+
+private:
+    stdx::mutex _mutex;
+    std::vector<stdx::thread> _threads;
+
+    std::shared_ptr<AlarmSchedulerPrecise> _scheduler;
+    std::unique_ptr<AlarmRunnerBackgroundThread> _runner;
+};
+
+const auto getAsyncRefresher = ServiceContext::declareDecoration<AsyncRefresher>();
+
+AsyncRefresher::~AsyncRefresher() {
+    log() << "Stopping the asynchronous refresher service";
+
+    if (_runner)
+        _runner->shutdown();
+
+    auto threads = [&] {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        std::vector<stdx::thread> threads;
+        std::swap(_threads, threads);
+        return threads;
+    }();
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    log() << "Stopped the asynchronous refresher service";
+}
+
+void AsyncRefresher::init() {
+    _scheduler =
+        std::make_shared<AlarmSchedulerPrecise>(getGlobalServiceContext()->getPreciseClockSource());
+
+    std::vector<std::shared_ptr<AlarmScheduler>> schedulers({_scheduler});
+    _runner = std::make_unique<AlarmRunnerBackgroundThread>(std::move(schedulers));
+    _runner->start();
+
+    log() << "Started the asynchronous refresher service";
+}
+
+void runAsyncRefresh(std::shared_ptr<AsyncRefresher::State>& state) try {
+    ScopedDbConnection conn(state->uri, durationCount<Seconds>(state->timeout));
+    bool ignoredOutParam = false;
+    Timer timer;
+    BSONObj isMaster;
+    conn->isMaster(ignoredOutParam, &isMaster);
+    int64_t pingMicros = timer.micros();
+    conn.done();  // return to pool on success.
+
+    if (state->finishLine.swap(true))
+        return;
+    AsyncRefresher::Reply reply(std::move(isMaster), pingMicros);
+    state->promise.emplaceValue(std::move(reply));
+} catch (const DBException& ex) {
+    if (state->finishLine.swap(true))
+        return;
+    state->promise.setError(ex.toStatus());
+}
+
+Future<AsyncRefresher::Reply> AsyncRefresher::asyncRefresh(MongoURI uri, Seconds timeout) {
+    auto pf = makePromiseFuture<Reply>();
+    auto state = std::make_shared<State>(std::move(uri), std::move(timeout), std::move(pf.promise));
+
+    {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        if (_threads.empty()) {
+            init();
+        }
+        _threads.emplace_back([state]() mutable { runAsyncRefresh(state); });
+    }
+
+    invariant(_scheduler);
+    auto alarm = _scheduler->alarmFromNow(timeout);
+    std::move(alarm.future)
+        .then([state]() {
+            if (state->finishLine.swap(true))
+                return;
+            state->promise.setError(
+                {ErrorCodes::NetworkTimeout, "Failed to refresh within the time limit"});
+            log() << "Encountered a timeout in asynchronous refresher";
+        })
+        .getAsync([](Status) {});
+
+    return std::move(pf.future);
+}
+
+// TODO
+
 HostAndPort Refresher::_refreshUntilMatches(const ReadPreferenceSetting* criteria) {
     Timer loopTimer;
     bool verbose = false;
@@ -865,9 +983,6 @@ HostAndPort Refresher::_refreshUntilMatches(const ReadPreferenceSetting* criteri
                 continue;
 
             case NextStep::CONTACT_HOST: {
-                StatusWith<BSONObj> isMasterReplyStatus{ErrorCodes::InternalError,
-                                                        "Uninitialized variable"};
-                int64_t pingMicros = 0;
                 MongoURI targetURI;
 
                 if (_set->setUri.isValid()) {
@@ -880,18 +995,9 @@ HostAndPort Refresher::_refreshUntilMatches(const ReadPreferenceSetting* criteri
 
                 // Do not do network calls while holding a mutex
                 lk.unlock();
-                try {
-                    ScopedDbConnection conn(targetURI, socketTimeoutSecs);
-                    bool ignoredOutParam = false;
-                    Timer timer;
-                    BSONObj reply;
-                    conn->isMaster(ignoredOutParam, &reply);
-                    isMasterReplyStatus = reply;
-                    pingMicros = timer.micros();
-                    conn.done();  // return to pool on success.
-                } catch (const DBException& ex) {
-                    isMasterReplyStatus = ex.toStatus();
-                }
+                auto reply = getAsyncRefresher(getGlobalServiceContext())
+                                 .asyncRefresh(targetURI, socketTimeout)
+                                 .getNoThrow();
                 lk.lock();
 
                 // Ignore the reply and return if we are no longer the current scan. This might
@@ -900,10 +1006,11 @@ HostAndPort Refresher::_refreshUntilMatches(const ReadPreferenceSetting* criteri
                     return criteria ? _set->getMatchingHost(*criteria) : HostAndPort();
                 }
 
-                if (isMasterReplyStatus.isOK())
-                    receivedIsMaster(ns.host, pingMicros, isMasterReplyStatus.getValue(), verbose);
+                if (reply.isOK())
+                    receivedIsMaster(
+                        ns.host, reply.getValue().pingMicros, reply.getValue().isMaster, verbose);
                 else
-                    failedHost(ns.host, isMasterReplyStatus.getStatus());
+                    failedHost(ns.host, reply.getStatus());
             }
         }
 

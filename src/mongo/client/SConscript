@@ -193,6 +193,7 @@ clientDriverEnv.Library(
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/executor/network_interface_thread_pool',
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
+        '$BUILD_DIR/mongo/util/alarm',
         '$BUILD_DIR/mongo/util/background_job',
         '$BUILD_DIR/mongo/util/md5',
         '$BUILD_DIR/mongo/util/net/network',
@@ -294,6 +295,7 @@ env.CppUnitTest('dbclient_rs_test',
                 ['dbclient_rs_test.cpp'],
                 LIBDEPS=[
                     'clientdriver_network',
+                    '$BUILD_DIR/mongo/db/service_context_test_fixture',
                     '$BUILD_DIR/mongo/dbtests/mocklib',
                 ],
 )
