@@ -311,7 +311,8 @@ StatusWith<HostAndPort> ReplicaSetMonitor::getHostOrRefresh(const ReadPreference
 
     return {ErrorCodes::FailedToSatisfyReadPreference,
             str::stream() << "Could not find host matching read preference " << criteria.toString()
-                          << " for set " << getName()};
+                          << " for set "
+                          << getName()};
 }
 
 HostAndPort ReplicaSetMonitor::getMasterOrUassert() {
@@ -612,7 +613,8 @@ void Refresher::receivedIsMaster(const HostAndPort& from,
         failedHost(from,
                    {ErrorCodes::InconsistentReplicaSetNames,
                     str::stream() << "Target replica set name " << reply.setName
-                                  << " does not match the monitored set name " << _set->name});
+                                  << " does not match the monitored set name "
+                                  << _set->name});
         return;
     }
 
@@ -696,11 +698,12 @@ Status Refresher::receivedIsMasterFromMaster(const HostAndPort& from, const IsMa
     // Reject if config version is older. This is for backwards compatibility with nodes in pv0
     // since they don't have the same ordering with pv1 electionId.
     if (reply.configVersion < _set->configVersion) {
-        return {
-            ErrorCodes::NotMaster,
-            str::stream() << "Node " << from << " believes it is primary, but its config version "
-                          << reply.configVersion << " is older than the most recent config version "
-                          << _set->configVersion};
+        return {ErrorCodes::NotMaster,
+                str::stream() << "Node " << from
+                              << " believes it is primary, but its config version "
+                              << reply.configVersion
+                              << " is older than the most recent config version "
+                              << _set->configVersion};
     }
 
     if (reply.electionId.isSet()) {
@@ -709,11 +712,12 @@ Status Refresher::receivedIsMasterFromMaster(const HostAndPort& from, const IsMa
         // because configVersion needs to be incremented whenever the protocol version is changed.
         if (reply.configVersion == _set->configVersion && _set->maxElectionId.isSet() &&
             _set->maxElectionId.compare(reply.electionId) > 0) {
-            return {
-                ErrorCodes::NotMaster,
-                str::stream() << "Node " << from << " believes it is primary, but its election id "
-                              << reply.electionId << " is older than the most recent election id "
-                              << _set->maxElectionId};
+            return {ErrorCodes::NotMaster,
+                    str::stream() << "Node " << from
+                                  << " believes it is primary, but its election id "
+                                  << reply.electionId
+                                  << " is older than the most recent election id "
+                                  << _set->maxElectionId};
         }
 
         _set->maxElectionId = reply.electionId;
@@ -850,6 +854,10 @@ private:
     stdx::mutex _mutex;
     std::vector<stdx::thread> _threads;
 
+    const int kMaxActiveThreads = 2000;
+    AtomicWord<int> _activeThreads{0};
+    AtomicWord<int> _lastThreadId{0};
+
     std::shared_ptr<AlarmSchedulerPrecise> _scheduler;
     std::unique_ptr<AlarmRunnerBackgroundThread> _runner;
 };
@@ -888,11 +896,16 @@ void AsyncRefresher::init() {
 }
 
 void runAsyncRefresh(std::shared_ptr<AsyncRefresher::State>& state) try {
+    log() << "Acquiring a new connection to " << state->uri;
     ScopedDbConnection conn(state->uri, durationCount<Seconds>(state->timeout));
+
+    log() << "Preparing to send isMaster to " << state->uri;
     bool ignoredOutParam = false;
     Timer timer;
     BSONObj isMaster;
     conn->isMaster(ignoredOutParam, &isMaster);
+
+    log() << "Received isMaster: " << isMaster;
     int64_t pingMicros = timer.micros();
     conn.done();  // return to pool on success.
 
@@ -915,7 +928,17 @@ Future<AsyncRefresher::Reply> AsyncRefresher::asyncRefresh(MongoURI uri, Seconds
         if (_threads.empty()) {
             init();
         }
-        _threads.emplace_back([state]() mutable { runAsyncRefresh(state); });
+
+        invariant(_activeThreads.fetchAndAdd(1) < kMaxActiveThreads,
+                  "Exceeded the maximum number of asynchronous refresher threads");
+        _threads.emplace_back([this, state]() mutable {
+            ON_BLOCK_EXIT([&] {
+                const auto threads = _activeThreads.fetchAndSubtract(1);
+                log() << "Retiring refresher thread, active refreshers: " << threads;
+            });
+            setThreadName(str::stream() << "refresher" << _lastThreadId.fetchAndAdd(1));
+            runAsyncRefresh(state);
+        });
     }
 
     invariant(_scheduler);
