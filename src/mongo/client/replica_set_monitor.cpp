@@ -61,9 +61,9 @@
 
 namespace mongo {
 
-using std::shared_ptr;
 using std::numeric_limits;
 using std::set;
+using std::shared_ptr;
 using std::string;
 using std::vector;
 
@@ -311,8 +311,7 @@ StatusWith<HostAndPort> ReplicaSetMonitor::getHostOrRefresh(const ReadPreference
 
     return {ErrorCodes::FailedToSatisfyReadPreference,
             str::stream() << "Could not find host matching read preference " << criteria.toString()
-                          << " for set "
-                          << getName()};
+                          << " for set " << getName()};
 }
 
 HostAndPort ReplicaSetMonitor::getMasterOrUassert() {
@@ -613,8 +612,7 @@ void Refresher::receivedIsMaster(const HostAndPort& from,
         failedHost(from,
                    {ErrorCodes::InconsistentReplicaSetNames,
                     str::stream() << "Target replica set name " << reply.setName
-                                  << " does not match the monitored set name "
-                                  << _set->name});
+                                  << " does not match the monitored set name " << _set->name});
         return;
     }
 
@@ -698,12 +696,11 @@ Status Refresher::receivedIsMasterFromMaster(const HostAndPort& from, const IsMa
     // Reject if config version is older. This is for backwards compatibility with nodes in pv0
     // since they don't have the same ordering with pv1 electionId.
     if (reply.configVersion < _set->configVersion) {
-        return {ErrorCodes::NotMaster,
-                str::stream() << "Node " << from
-                              << " believes it is primary, but its config version "
-                              << reply.configVersion
-                              << " is older than the most recent config version "
-                              << _set->configVersion};
+        return {
+            ErrorCodes::NotMaster,
+            str::stream() << "Node " << from << " believes it is primary, but its config version "
+                          << reply.configVersion << " is older than the most recent config version "
+                          << _set->configVersion};
     }
 
     if (reply.electionId.isSet()) {
@@ -712,12 +709,11 @@ Status Refresher::receivedIsMasterFromMaster(const HostAndPort& from, const IsMa
         // because configVersion needs to be incremented whenever the protocol version is changed.
         if (reply.configVersion == _set->configVersion && _set->maxElectionId.isSet() &&
             _set->maxElectionId.compare(reply.electionId) > 0) {
-            return {ErrorCodes::NotMaster,
-                    str::stream() << "Node " << from
-                                  << " believes it is primary, but its election id "
-                                  << reply.electionId
-                                  << " is older than the most recent election id "
-                                  << _set->maxElectionId};
+            return {
+                ErrorCodes::NotMaster,
+                str::stream() << "Node " << from << " believes it is primary, but its election id "
+                              << reply.electionId << " is older than the most recent election id "
+                              << _set->maxElectionId};
         }
 
         _set->maxElectionId = reply.electionId;
@@ -985,7 +981,7 @@ HostAndPort Refresher::_refreshUntilMatches(const ReadPreferenceSetting* criteri
 
                 if (reply.isOK())
                     receivedIsMaster(
-                        ns.host, reply.getValue().pingMicros, reply.getValue().isMaster, verbose);
+                        ns.host, reply.getValue().pingMicros, reply.getValue().isMaster);
                 else
                     failedHost(ns.host, reply.getStatus());
             }
@@ -1420,4 +1416,4 @@ void ScanState::enqueAllUntriedHosts(const Container& container, PseudoRandom& r
     }
     std::random_shuffle(hostsToScan.begin(), hostsToScan.end(), rand);
 }
-}
+}  // namespace mongo
